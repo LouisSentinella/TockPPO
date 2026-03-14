@@ -11,9 +11,7 @@ class Board:
     HOME_STRETCH_END_INDEX = {0: 57, 1: 61, 2: 65}
 
     def is_just_out(self, pawn):
-        if pawn.zone == Zone.MAIN and pawn.index == self.JUST_OUT_TILES[pawn.owner]:
-            return True
-        return False
+        return pawn.zone == Zone.MAIN and pawn.is_newly_deployed
 
     def is_protected(self, pawn):
         if pawn.zone == Zone.BASE or pawn.zone == Zone.HOME or self.is_just_out(pawn):

@@ -1,3 +1,5 @@
+import random
+
 from action import Action, ActionType
 from board import Board
 from state import Zone, Pawn, GameState
@@ -22,6 +24,7 @@ def resolve_move(state: GameState, pawn: Pawn, path: list, is_seven=False) -> Ga
     if path[-1] >= 54:
         moving_pawn.zone = Zone.HOME
     moving_pawn.index = path[-1]
+    moving_pawn.is_newly_deployed = False
 
     return new_state
 
@@ -38,6 +41,7 @@ def resolve_deploy(state: GameState) -> GameState:
 
     deploy_pawn.zone = Zone.MAIN
     deploy_pawn.index = Board.JUST_OUT_TILES[state.active_player]
+    deploy_pawn.is_newly_deployed = True
 
     return new_state
 
@@ -65,8 +69,13 @@ def build_tile_map(state: GameState) -> dict[int, Optional[Pawn]]:
 
 def is_path_blocked(path, tile_map, board):
     for tile in path:
-        if tile_map[tile] is not None and board.is_just_out(tile_map[tile]):
-            return True
+
+        occupant = tile_map[tile]
+        if occupant is not None:
+            if board.is_just_out(occupant):
+                return True
+            if occupant.zone == Zone.HOME:
+                return True
     return False
 
 def add_normal_move_actions(card, pawn, board, tile_map, state, actions, steps=None):
@@ -88,6 +97,47 @@ def add_normal_move_actions(card, pawn, board, tile_map, state, actions, steps=N
         except ValueError:
             pass
 
+def generate_seven_moves(remaining, moves_so_far, current_state, board, actions):
+
+    if remaining == 0:
+        actions.append(Action(card=7, action_type=ActionType.SEVEN, seven_moves=moves_so_far))
+        return
+
+    current_player = current_state.active_player
+    tile_map = build_tile_map(current_state)
+
+    last_pawn_id = None
+    if moves_so_far:
+        last_pawn_id = moves_so_far[-1][0].pawn_id
+
+    for pawn in [p for p in current_state.pawns[current_player] if p.zone != Zone.BASE]:
+
+        if pawn.pawn_id == last_pawn_id:
+            continue
+
+        for steps in range(1, remaining + 1):
+
+            # branch 1: no home entry
+            try:
+                path = board.get_path(pawn, steps)
+            except ValueError:
+                continue
+
+            if not is_path_blocked(path, tile_map, board):
+                new_state = resolve_move(current_state, pawn, path, is_seven=True)
+                generate_seven_moves(remaining - steps, moves_so_far + [(pawn, path)], new_state, board, actions)
+
+            # branch 2: enter home
+            if board.HOME_ENTRY_TILES[pawn.owner] in path:
+                try:
+                    home_path = board.get_path(pawn, steps, enter_home=True)
+                except ValueError:
+                    continue
+
+                if not is_path_blocked(home_path, tile_map, board):
+                    new_state = resolve_move(current_state, pawn, home_path, is_seven=True)
+                    generate_seven_moves(remaining - steps, moves_so_far + [(pawn, home_path)], new_state, board, actions)
+
 def get_legal_moves(state: GameState, board: Board) -> list[Action]:
     current_player = state.active_player
     player_hand = state.hands[current_player]
@@ -99,6 +149,9 @@ def get_legal_moves(state: GameState, board: Board) -> list[Action]:
     other_player_index = [p for p in range(3) if p != current_player]
     other_pawns = [j for i in other_player_index for j in state.pawns[i]]
     base_pawns = [p for p in player_pawns if p.zone == Zone.BASE]
+
+    if state.skip_flag:
+        return [Action(card=card, action_type=ActionType.DISCARD) for card in player_hand]
 
     for card in set(player_hand):
         if card == 1:
@@ -119,12 +172,11 @@ def get_legal_moves(state: GameState, board: Board) -> list[Action]:
                 if not is_path_blocked(path, tile_map, board):
                     actions.append(
                         Action(card=card, action_type=ActionType.MOVE, pawn=pawn, path=path, enter_home=False))
-
         elif card == 5:
             for pawn in [p for j in state.pawns for p in j if p.zone != Zone.BASE and not board.is_just_out(p)]:
                 add_normal_move_actions(card, pawn, board, tile_map, state, actions)
         elif card == 7:
-            pass
+            generate_seven_moves(7, [], state, board, actions)
         elif card == 11:
             for pawn in [p for p in player_pawns if p.zone == Zone.MAIN and not board.is_just_out(p)]:
                 for other_pawn in [p for p in other_pawns if p.zone == Zone.MAIN and not board.is_just_out(p)]:
@@ -141,3 +193,76 @@ def get_legal_moves(state: GameState, board: Board) -> list[Action]:
         else:
             raise Exception(f'Unknown card {card}')
 
+    if len(actions) == 0:
+        for card in player_hand:
+            actions.append(Action(card=card, action_type=ActionType.DISCARD))
+
+    return actions
+
+def advance_turn(state: GameState, action: Action) -> tuple[GameState, bool]:
+
+    # Apply the action
+    if action.action_type == ActionType.DISCARD:
+        new_state = copy.deepcopy(state)
+    elif action.action_type == ActionType.MOVE:
+        new_state = resolve_move(state, action.pawn, action.path)
+    elif action.action_type == ActionType.SWAP:
+        new_state = resolve_swap(state, action.pawn, action.target_pawn)
+    elif action.action_type == ActionType.DEPLOY:
+        new_state = resolve_deploy(state)
+    elif action.action_type == ActionType.SEVEN:
+        new_state = state
+        for pawn, path in action.seven_moves:
+            new_state = resolve_move(new_state, pawn, path, is_seven=True)
+    else:
+        raise Exception(f'Unknown action type {action.action_type}')
+
+    new_state.skip_flag = False
+
+    # Remove played card, add to discard
+    new_state.hands[new_state.active_player].remove(action.card)
+    new_state.discard_pile.append(action.card)
+
+    # Check win condition on player
+    win_condition = True
+    for pawn in new_state.pawns[new_state.active_player]:
+        if pawn.zone != Zone.HOME:
+            win_condition = False
+
+    if win_condition:
+        return new_state, True
+
+    # Handle 10 card
+    if action.card == 10:
+        new_state.skip_flag = True
+
+    # Advance active player
+    new_state.active_player = (new_state.active_player + 1) % 3
+
+    # Handle empty hands
+    all_empty = True
+    for hand in new_state.hands:
+        if len(hand) > 0:
+            all_empty = False
+
+    if all_empty:
+        new_state.deal_round += 1
+        if new_state.deal_round > 4:
+            new_state.deal_round = 1
+            new_state.deal_starting_player = (new_state.deal_starting_player + 1) % 3
+            new_state.deck = new_state.discard_pile.copy() + new_state.deck
+            new_state.discard_pile = []
+            random.shuffle(new_state.deck)
+
+        if new_state.deal_round == 1:
+            deal_size = 5
+        else:
+            deal_size = 4
+
+        for i in range(3):
+            player = (new_state.deal_starting_player + i) % 3
+            new_state.hands[player] = new_state.deck[:deal_size]
+            new_state.deck = new_state.deck[deal_size:]
+
+    # Return new state
+    return new_state, win_condition

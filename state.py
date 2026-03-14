@@ -17,6 +17,7 @@ class Pawn:
     zone: Zone
     pawn_id: int
     index: Optional[int] = None
+    is_newly_deployed: bool = False
 
 @dataclass
 class GameState:

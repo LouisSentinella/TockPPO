@@ -39,3 +39,6 @@ class TestEnv(unittest.TestCase):
         pawns[0][0] = make_pawn(0, 0, 5)
         state = make_state(pawns, [[3, 2], [2], [2]])
         self.assertEqual(len(encoding.encode_state(state)), 30)
+
+if __name__ == '__main__':
+    unittest.main()

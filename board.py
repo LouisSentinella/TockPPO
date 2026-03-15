@@ -4,7 +4,7 @@ from state import Zone
 
 class Board:
     JUST_OUT_TILES = {0:0, 1:18, 2:36}
-    HOME_ENTRY_TILES = {0:16, 1:34, 2:52}
+    HOME_ENTRY_TILES = {0:52, 1:16, 2:34}
     MAIN_TRACK_SIZE = 54
     HOME_STRETCH_SIZE = 4
     HOME_STRETCH_STARTING_INDEX = {0:54, 1:58, 2:62}

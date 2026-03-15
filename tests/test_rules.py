@@ -96,19 +96,6 @@ class TestLegalMoves(unittest.TestCase):
         move_actions = [a for a in actions if a.action_type == ActionType.MOVE and a.pawn.pawn_id == 0]
         self.assertEqual(len(move_actions), 0)
 
-    # ── Home stretch entry ────────────────────────────────────────────
-
-    def test_home_entry_generates_two_actions(self):
-        pawns = all_base_pawns()
-        pawns[0][0] = make_pawn(0, 0, 14)
-        state = make_state(pawns, [3])  # path crosses tile 16
-        actions = rules.get_legal_moves(state, self.board)
-        move_actions = [a for a in actions if a.action_type == ActionType.MOVE]
-        enter = [a for a in move_actions if a.enter_home]
-        no_enter = [a for a in move_actions if not a.enter_home]
-        self.assertEqual(len(enter), 1)
-        self.assertEqual(len(no_enter), 1)
-
     # ── Deploy ───────────────────────────────────────────────────────
 
     def test_ace_deploy_when_just_out_empty(self):

@@ -12,7 +12,7 @@ def resolve_move(state: GameState, pawn: Pawn, path: list, is_seven=False) -> Ga
     moving_pawn = new_state.pawns[pawn.owner][pawn.pawn_id]
     tile_map = build_tile_map(new_state)
     if is_seven:
-        capture_tiles = path.copy()
+        capture_tiles = [tile for tile in path.copy()[:-1] if tile_map[tile] is not None and tile_map[tile].owner != pawn.owner] + [path.copy()[-1]]
     else:
         capture_tiles = [path[-1]]
 
@@ -86,16 +86,32 @@ def add_normal_move_actions(card, pawn, board, tile_map, state, actions, steps=N
     except ValueError:
         return
 
-    if not is_path_blocked(path, tile_map, board):
-        actions.append(Action(card=card, action_type=ActionType.MOVE, pawn=pawn, path=path, enter_home=False))
+    crosses_home = board.HOME_ENTRY_TILES[pawn.owner] in path
 
-    if board.HOME_ENTRY_TILES[pawn.owner] in path:
-        try:
-            home_path = board.get_path(pawn, steps, enter_home=True)
-            if not is_path_blocked(home_path, tile_map, board):
-                actions.append(Action(card=card, action_type=ActionType.MOVE, pawn=pawn, path=home_path, enter_home=True))
-        except ValueError:
-            pass
+    if crosses_home:
+        if pawn.owner == state.active_player:
+            try:
+                home_path = board.get_path(pawn, steps, enter_home=True)
+                if not is_path_blocked(home_path, tile_map, board):
+                    actions.append(Action(card=card, action_type=ActionType.MOVE, pawn=pawn, path=home_path, enter_home=True))
+                    return
+            except ValueError:
+                pass
+            if not is_path_blocked(path, tile_map, board):
+                actions.append(Action(card=card, action_type=ActionType.MOVE, pawn=pawn, path=path, enter_home=False))
+        else:
+            if not is_path_blocked(path, tile_map, board):
+                actions.append(Action(card=card, action_type=ActionType.MOVE, pawn=pawn, path=path, enter_home=False))
+            try:
+                home_path = board.get_path(pawn, steps, enter_home=True)
+                if not is_path_blocked(home_path, tile_map, board):
+                    actions.append(Action(card=card, action_type=ActionType.MOVE, pawn=pawn, path=home_path, enter_home=True))
+            except ValueError:
+                pass
+    else:
+        if not is_path_blocked(path, tile_map, board):
+            actions.append(Action(card=card, action_type=ActionType.MOVE, pawn=pawn, path=path, enter_home=False))
+
 
 def generate_seven_moves(remaining, moves_so_far, current_state, board, actions):
 
@@ -106,37 +122,41 @@ def generate_seven_moves(remaining, moves_so_far, current_state, board, actions)
     current_player = current_state.active_player
     tile_map = build_tile_map(current_state)
 
-    last_pawn_id = None
-    if moves_so_far:
-        last_pawn_id = moves_so_far[-1][0].pawn_id
+    used_pawn_ids = {move[0].pawn_id for move in moves_so_far}
 
     for pawn in [p for p in current_state.pawns[current_player] if p.zone != Zone.BASE]:
 
-        if pawn.pawn_id == last_pawn_id:
+        if pawn.pawn_id in used_pawn_ids:
             continue
 
         for steps in range(1, remaining + 1):
 
+            path = None
+
             # branch 1: no home entry
             try:
-                path = board.get_path(pawn, steps)
+                candidate_path = board.get_path(pawn, steps)
             except ValueError:
                 continue
 
-            if not is_path_blocked(path, tile_map, board):
+            # branch 2: enter home if path crosses home entry
+            if board.HOME_ENTRY_TILES[pawn.owner] in candidate_path:
+                try:
+                    home_path = board.get_path(pawn, steps, enter_home=True)
+                    if not is_path_blocked(home_path, tile_map, board):
+                        path = home_path
+                except ValueError:
+                    pass  # overshoot — fall through to use bypass path
+
+            if path is None:
+                if not is_path_blocked(candidate_path, tile_map, board):
+                    path = candidate_path
+
+            if path is not None:
                 new_state = resolve_move(current_state, pawn, path, is_seven=True)
                 generate_seven_moves(remaining - steps, moves_so_far + [(pawn, path)], new_state, board, actions)
 
-            # branch 2: enter home
-            if board.HOME_ENTRY_TILES[pawn.owner] in path:
-                try:
-                    home_path = board.get_path(pawn, steps, enter_home=True)
-                except ValueError:
-                    continue
 
-                if not is_path_blocked(home_path, tile_map, board):
-                    new_state = resolve_move(current_state, pawn, home_path, is_seven=True)
-                    generate_seven_moves(remaining - steps, moves_so_far + [(pawn, home_path)], new_state, board, actions)
 
 def get_legal_moves(state: GameState, board: Board) -> list[Action]:
     current_player = state.active_player

@@ -1,44 +1,51 @@
+import math
 import rules
 from board import Board
 from action import Action, ActionType
 from rules import is_path_blocked
 from state import GameState, Zone
 
+# Observation layout (89 features total):
+#   [0:72]  pawn positions — 12 pawns × 6 features each
+#           per pawn: [is_base, sin(track), cos(track), track_norm, is_home, home_progress]
+#   [72:85] card counts for active player's hand (ranks A–K, 13 values)
+#   [85:87] opponent hand sizes (P1, P2 clockwise)
+#   [87]    deal round
+#   [88]    skip flag
 
-def encode_state(state: GameState) -> list[int]:
+def encode_state(state: GameState) -> list[float]:
     active_player = state.active_player
     clockwise_players = [active_player, (active_player + 1) % 3, (active_player + 2) % 3]
 
-    encoding = []
-    # pawn positions
-    for rel_idx, player in enumerate(clockwise_players):
+    encoding: list[float] = []
+    # pawn positions — 6 features per pawn, 72 features total
+    for player in clockwise_players:
         for pawn in state.pawns[player]:
             if pawn.zone == Zone.BASE:
-                encoding.append(-1)
+                encoding.extend([1.0, 0.0, 0.0, 0.0, 0.0, 0.0])
             elif pawn.zone == Zone.HOME:
-                offset_within_home = pawn.index - Board.HOME_STRETCH_STARTING_INDEX[pawn.owner]
-                encoding.append(54 + (rel_idx * 4) + offset_within_home)
+                offset = pawn.index - Board.HOME_STRETCH_STARTING_INDEX[pawn.owner]
+                encoding.extend([0.0, 0.0, 0.0, 0.0, 1.0, offset / 3.0])
             else:
-                encoding.append((pawn.index - active_player * 18) % 54)
+                track_pos = (pawn.index - active_player * 18) % 54
+                angle = 2.0 * math.pi * track_pos / 54.0
+                encoding.extend([0.0, math.sin(angle), math.cos(angle), track_pos / 53.0, 0.0, 0.0])
 
     # card counts
     counts = [0] * 13
     for card in state.hands[active_player]:
         counts[card - 1] += 1
-    encoding.extend(counts)
+    encoding.extend(float(c) for c in counts)
 
     # opponent hand sizes
     for player in clockwise_players[1:]:
-        encoding.append(len(state.hands[player]))
+        encoding.append(float(len(state.hands[player])))
 
     # deal round
-    encoding.append(state.deal_round)
-
-    # active player
-    encoding.append(state.active_player)
+    encoding.append(float(state.deal_round))
 
     # skip flag
-    encoding.append(int(state.skip_flag))
+    encoding.append(float(state.skip_flag))
 
     return encoding
 

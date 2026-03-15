@@ -1,4 +1,6 @@
 import argparse
+import os
+import re
 import random
 import sys
 import time
@@ -63,9 +65,8 @@ def run_game(agent: Agent, board: Board, device: torch.device, max_turns: int = 
 def benchmark(agent, board, device, n_games, seed_offset=0):
     wins = [0, 0, 0]
     unfinished = 0
-    lengths = []
 
-    for i in tqdm.tqdm(n_games):
+    for i in tqdm.tqdm(range(n_games)):
         result = run_game(agent, board, device, seed=seed_offset + i, max_turns=1000)
         if result == -1:
             unfinished += 1
@@ -86,12 +87,18 @@ def benchmark(agent, board, device, n_games, seed_offset=0):
     sign  = "+" if delta >= 0 else ""
     print(f"  PPO vs baseline: {sign}{delta:.1f}pp\n")
 
+    binom = binomtest(wins[0], n=n_games, p=1 / 3, alternative='greater')
+    print(f"p-value:  {binom.pvalue:.4f}")
 
-    n_games = n_games
-    n_wins = wins[0]
+    return wins, binom.pvalue
 
-    result = binomtest(n_wins, n=n_games, p=1 / 3, alternative='greater')
-    print(f"p-value:  {result.pvalue:.4f}")
+
+def log_eval_result(log_path, steps, win_pct, p_value):
+    write_header = not os.path.exists(log_path)
+    with open(log_path, "a") as f:
+        if write_header:
+            f.write("steps,win_pct,p_value\n")
+        f.write(f"{steps},{win_pct:.2f},{p_value:.4f}\n")
 
 
 def main():
@@ -101,6 +108,8 @@ def main():
     parser.add_argument("--seed",   type=int,   default=None)
     parser.add_argument("--device", type=str,   default="cpu",
                         help="cpu | cuda | mps")
+    parser.add_argument("--log",    type=str,   default=None,
+                        help="CSV file to append results to")
     args = parser.parse_args()
 
     device = torch.device(args.device)
@@ -119,7 +128,12 @@ def main():
         run_game(agent, board, device, verbose=True, seed=seed)
     else:
         seed_offset = args.seed if args.seed is not None else random.randint(0, 9999)
-        benchmark(agent, board, device, n_games=args.games, seed_offset=seed_offset)
+        wins, p_value = benchmark(agent, board, device, n_games=args.games, seed_offset=seed_offset)
+
+        if args.log:
+            m = re.search(r'ckpt_step_(\d+)', args.checkpoint)
+            steps = int(m.group(1)) if m else -1
+            log_eval_result(args.log, steps, 100 * wins[0] / args.games, p_value)
 
 
 if __name__ == "__main__":

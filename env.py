@@ -37,61 +37,53 @@ def make_initial_state(deal_starting_player: int = 0) -> GameState:
     )
 
 
-CAPTURE_REWARD = 0.1
-HOME_REWARD    = 0.1
+CAPTURE_REWARD = 0.02
+HOME_REWARD    = 0.02
 
 
 class TockEnv(gym.Env):
     metadata = {"render_modes": []}
 
-    def __init__(self, opponent_weights=None):
+    def __init__(self, opponent_weights=None, opponent_weights2=None):
         super().__init__()
         self.board        = Board()
         self.action_table = ACTION_TABLE
         self.observation_space = gym.spaces.Box(
-            low=-1, high=65, shape=(30,), dtype=np.int64
+            low=-np.inf, high=np.inf, shape=(89,), dtype=np.float32
         )
         self.action_space = gym.spaces.Discrete(len(ACTION_TABLE))
         self.state: GameState | None = None
 
-        self._opponent = None
-        if opponent_weights is not None:
-            from model import Agent
-            self._opponent = Agent()
-            self._opponent.load_state_dict(opponent_weights)
-            self._opponent.eval()
-
-    def set_opponent_weights(self, opponent_weights):
-        """Update the frozen opponent policy in-place (used for pool refreshes)."""
-        if opponent_weights is None:
-            self._opponent = None
-            return
-        from model import Agent
-        if self._opponent is None:
-            self._opponent = Agent()
-        self._opponent.load_state_dict(opponent_weights)
-        self._opponent.eval()
+        self._opponents = [None, None]  # index 0 → player 1, index 1 → player 2
+        for slot, weights in enumerate([opponent_weights, opponent_weights2]):
+            if weights is not None:
+                from model import Agent
+                opp = Agent()
+                opp.load_state_dict(weights)
+                opp.eval()
+                self._opponents[slot] = opp
 
     def _opponent_action(self, state: GameState):
-        if self._opponent is None:
+        slot = state.active_player - 1   # player 1 → slot 0, player 2 → slot 1
+        opp  = self._opponents[slot]
+        if opp is None:
             return random.choice(get_legal_moves(state, self.board))
         obs  = torch.as_tensor(encode_state(state), dtype=torch.float32).unsqueeze(0)
         mask = torch.tensor(
             get_legal_mask(state, self.board, self.action_table), dtype=torch.bool
         ).unsqueeze(0)
         with torch.no_grad():
-            action_idx, _, _, _ = self._opponent.get_action_and_value(obs, mask)
+            action_idx, _, _, _ = opp.get_action_and_value(obs, mask)
         return decode_action(self.action_table, action_idx.item(), state, self.board)
 
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
         self.state = make_initial_state()
-        obs  = np.array(encode_state(self.state), dtype=np.int64)
+        obs  = np.array(encode_state(self.state), dtype=np.float32)
         mask = np.array(get_legal_mask(self.state, self.board, self.action_table), dtype=bool)
         return obs, {"action_mask": mask}
 
     def shaping_reward(self, old_state: GameState, new_state: GameState) -> float:
-        """Shaping reward from player 0's perspective only."""
         reward = 0.0
         for player in range(3):
             for i in range(4):
@@ -106,24 +98,20 @@ class TockEnv(gym.Env):
         return reward
 
     def step(self, action_index: int):
-        # --- Player 0's turn ---
         action    = decode_action(self.action_table, action_index, self.state, self.board)
         new_state, game_over = advance_turn(self.state, action)
 
         reward = self.shaping_reward(self.state, new_state)
 
         if game_over:
-            # new_state.active_player is still 0 here (advance_turn returns before
-            # incrementing active_player when the game ends).
             reward += 1.0
             self.state = new_state
-            obs  = np.array(encode_state(self.state), dtype=np.int64)
+            obs  = np.array(encode_state(self.state), dtype=np.float32)
             mask = np.zeros(len(self.action_table), dtype=bool)
             return obs, reward, True, False, {"action_mask": mask}
 
         self.state = new_state
 
-        # --- Opponent turns (players 1 and 2) ---
         while self.state.active_player != 0:
             opp_action = self._opponent_action(self.state)
             self.state, game_over = advance_turn(self.state, opp_action)
@@ -131,11 +119,11 @@ class TockEnv(gym.Env):
             if game_over:
                 # An opponent won — player 0 loses.
                 reward -= 1.0
-                obs  = np.array(encode_state(self.state), dtype=np.int64)
+                obs  = np.array(encode_state(self.state), dtype=np.float32)
                 mask = np.zeros(len(self.action_table), dtype=bool)
                 return obs, reward, True, False, {"action_mask": mask}
 
-        obs  = np.array(encode_state(self.state), dtype=np.int64)
+        obs  = np.array(encode_state(self.state), dtype=np.float32)
         mask = np.array(get_legal_mask(self.state, self.board, self.action_table), dtype=bool)
         return obs, reward, False, False, {"action_mask": mask}
 

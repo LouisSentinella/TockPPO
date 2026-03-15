@@ -5,11 +5,12 @@ import time
 
 import torch
 import numpy as np
+import tqdm
 
 from board import Board
 from encoding import ACTION_TABLE, encode_state, get_legal_mask, decode_action
 from env import make_initial_state
-from train import Agent
+from model import Agent
 from scipy.stats import binomtest
 from rules import advance_turn, get_legal_moves
 
@@ -25,7 +26,7 @@ JUST_OUT   = {0: 0,  1: 18, 2: 36}
 HOME_ENTRY = {0: 52, 1: 16, 2: 34}
 
 
-def run_game(agent: Agent, board: Board, device: torch.device, max_turns: int = 1000, verbose: bool = True, seed: int | None = None) -> int:
+def run_game(agent: Agent, board: Board, device: torch.device, max_turns: int = 1000, seed: int | None = None) -> int:
     if seed is not None:
         random.seed(seed)
 
@@ -54,13 +55,8 @@ def run_game(agent: Agent, board: Board, device: torch.device, max_turns: int = 
 
         if game_over:
             winner = state.active_player
-            if verbose:
-                label = f"{NAMES[winner]} wins" if winner == 0 else f"{NAMES[winner]} wins"
-                print(f"{label} in {turn} turns!")
             return winner
 
-    if verbose:
-        print(f"Game did not finish within {max_turns} turns.")
     return -1
 
 
@@ -69,10 +65,8 @@ def benchmark(agent, board, device, n_games, seed_offset=0):
     unfinished = 0
     lengths = []
 
-    for i in range(n_games):
-        result = run_game(agent, board, device,
-                          delay=0, verbose=False, seed=seed_offset + i,
-                          max_turns=1000)
+    for i in tqdm.tqdm(n_games):
+        result = run_game(agent, board, device, seed=seed_offset + i, max_turns=1000)
         if result == -1:
             unfinished += 1
         else:

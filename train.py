@@ -1,16 +1,16 @@
 import argparse
+import random
 import time
 
 import gymnasium as gym
 import numpy as np
 import torch
 import torch.nn as nn
-from torch.distributions import Categorical
 
 from encoding import ACTION_TABLE
 from env import TockEnv
+from model import Agent, OBS_DIM, ACTION_DIM
 
-HIDDEN        = 256
 N_STEPS       = 2048      # rollout steps per env per rollout
 N_ENVS        = 8         # parallel environments
 PPO_EPOCHS    = 4
@@ -25,48 +25,21 @@ MAX_GRAD_NORM = 0.5
 TOTAL_STEPS   = 10_000_000
 CHECKPOINT_EVERY = 100     # rollouts
 
-OBS_DIM    = 30
-ACTION_DIM = len(ACTION_TABLE)
+POOL_SIZE         = 10     # max frozen opponents to keep
+POOL_UPDATE_EVERY = 50     # rollouts between pool additions / env recreations
 
-class Agent(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.trunk = nn.Sequential(
-            nn.Linear(OBS_DIM, HIDDEN),
-            nn.ReLU(),
-            nn.Linear(HIDDEN, HIDDEN),
-            nn.ReLU(),
-        )
-        self.policy_head = nn.Linear(HIDDEN, ACTION_DIM)
-        self.value_head  = nn.Linear(HIDDEN, 1)
 
-        for layer in self.trunk:
-            if isinstance(layer, nn.Linear):
-                nn.init.orthogonal_(layer.weight, gain=np.sqrt(2))
-                nn.init.zeros_(layer.bias)
-        nn.init.orthogonal_(self.policy_head.weight, gain=0.01)
-        nn.init.zeros_(self.policy_head.bias)
-        nn.init.orthogonal_(self.value_head.weight, gain=1.0)
-        nn.init.zeros_(self.value_head.bias)
+def make_env(opponent_weights):
+    return TockEnv(opponent_weights=opponent_weights)
 
-    def get_value(self, obs: torch.Tensor) -> torch.Tensor:
-        return self.value_head(self.trunk(obs))
 
-    def get_action_and_value(
-        self,
-        obs: torch.Tensor,
-        mask: torch.Tensor,
-        action: torch.Tensor | None = None,
-    ):
-        features      = self.trunk(obs)
-        logits        = self.policy_head(features)
-        masked_logits = logits.masked_fill(~mask, -1e8)
-        dist          = Categorical(logits=masked_logits)
+def build_envs(vec_cls, n_envs, opponent_pool):
+    factories = [
+        make_env(random.choice(opponent_pool) if opponent_pool else None)
+        for _ in range(n_envs)
+    ]
+    return vec_cls(factories)
 
-        if action is None:
-            action = dist.sample()
-
-        return action, dist.log_prob(action), dist.entropy(), self.value_head(features)
 
 def masks_from_infos(infos: dict, n_envs: int) -> torch.Tensor:
     raw = infos.get("action_mask")
@@ -85,7 +58,6 @@ def save_checkpoint(agent, opt, rollout, global_step, ckpt_dir, tag=None):
         "rollout":     rollout,
         "global_step": global_step,
     }, path)
-    # Also keep a symlink-style "latest" copy for easy loading
     latest = os.path.join(ckpt_dir, "latest.pt")
     torch.save({
         "agent":       agent.state_dict(),
@@ -101,8 +73,7 @@ def parse_args():
     parser.add_argument("--total-timesteps",  type=int,   default=TOTAL_STEPS)
     parser.add_argument("--n-envs",           type=int,   default=N_ENVS)
     parser.add_argument("--checkpoint-every", type=int,   default=CHECKPOINT_EVERY)
-    parser.add_argument("--checkpoint-dir",   type=str,   default="checkpoints",
-                        help="Directory to save checkpoints in")
+    parser.add_argument("--checkpoint-dir",   type=str,   default="checkpoints")
     parser.add_argument("--resume",           type=str,   default=None,
                         help="Path to checkpoint .pt file to resume from")
     parser.add_argument("--device",           type=str,   default="auto",
@@ -125,7 +96,6 @@ def main():
     os.makedirs(args.checkpoint_dir, exist_ok=True)
 
     vec_cls = gym.vector.SyncVectorEnv if args.sync else gym.vector.AsyncVectorEnv
-    envs    = vec_cls([TockEnv] * n_envs)
 
     batch_size     = N_STEPS * n_envs
     minibatch_size = batch_size // N_MINIBATCHES
@@ -137,6 +107,9 @@ def main():
     start_rollout = 0
     global_step   = 0
 
+    # Opponent pool: list of CPU state_dicts of past agent snapshots.
+    opponent_pool: list[dict] = []
+
     if args.resume:
         ckpt = torch.load(args.resume, map_location=device, weights_only=False)
         agent.load_state_dict(ckpt["agent"])
@@ -144,6 +117,11 @@ def main():
         start_rollout = ckpt.get("rollout", 0) + 1
         global_step   = ckpt.get("global_step", 0)
         print(f"Resumed from {args.resume}  (rollout {start_rollout}, step {global_step})")
+        # Seed pool with the loaded checkpoint so opponents aren't random from the start.
+        pool_entry = {k: v.clone().cpu() for k, v in agent.state_dict().items()}
+        opponent_pool.append(pool_entry)
+
+    envs = build_envs(vec_cls, n_envs, opponent_pool)
 
     print(
         f"Device: {device}  |  Envs: {n_envs}  |  "
@@ -164,14 +142,15 @@ def main():
     ep_length_acc = np.zeros(n_envs, dtype=np.int32)
 
     obs_np, infos = envs.reset()
-    obs   = torch.from_numpy(obs_np).float()            # (n_envs, OBS_DIM)
-    masks = masks_from_infos(infos, n_envs)             # (n_envs, ACTION_DIM)
+    obs   = torch.from_numpy(obs_np).float()
+    masks = masks_from_infos(infos, n_envs)
 
-    start_time      = time.time()
+    start_time         = time.time()
     session_start_step = global_step
 
     for rollout in range(start_rollout, num_rollouts):
-        # rollout
+
+        # --- Rollout ---
         agent.eval()
         with torch.no_grad():
             for step in range(N_STEPS):
@@ -193,7 +172,6 @@ def main():
                 reward_buf[step] = torch.from_numpy(rewards.astype(np.float32))
                 done_buf[step]   = torch.from_numpy(dones.astype(np.float32))
 
-                # Per-env episode tracking
                 ep_reward_acc += rewards
                 ep_length_acc += 1
                 for i in range(n_envs):
@@ -207,6 +185,7 @@ def main():
                 obs   = torch.from_numpy(obs_np).float()
                 masks = masks_from_infos(infos, n_envs)
 
+        # --- GAE ---
         advantages = torch.zeros(N_STEPS, n_envs)
         last_adv   = torch.zeros(n_envs)
         for t in reversed(range(N_STEPS)):
@@ -223,7 +202,6 @@ def main():
 
         returns = advantages + value_buf
 
-        # Flatten (N_STEPS × n_envs) for PPO update
         b_obs      = obs_buf.reshape(-1, OBS_DIM).to(device)
         b_mask     = mask_buf.reshape(-1, ACTION_DIM).to(device)
         b_actions  = action_buf.reshape(-1).to(device)
@@ -231,6 +209,7 @@ def main():
         b_returns  = returns.reshape(-1).to(device)
         b_adv      = advantages.reshape(-1).to(device)
 
+        # --- PPO Update ---
         agent.train()
         indices = np.arange(batch_size)
 
@@ -288,11 +267,28 @@ def main():
             f"approx_kl={np.mean(approx_kls):.4f}  "
             f"entropy={-np.mean(ent_losses):.3f}  "
             f"pg_loss={np.mean(pg_losses):.4f}  "
-            f"v_loss={np.mean(v_losses):.4f}"
+            f"v_loss={np.mean(v_losses):.4f}  "
+            f"pool={len(opponent_pool)}"
         )
 
         if (rollout + 1) % args.checkpoint_every == 0:
             save_checkpoint(agent, opt, rollout, global_step, args.checkpoint_dir)
+
+        # --- Opponent pool update ---
+        if (rollout + 1) % POOL_UPDATE_EVERY == 0:
+            pool_entry = {k: v.clone().cpu() for k, v in agent.state_dict().items()}
+            opponent_pool.append(pool_entry)
+            if len(opponent_pool) > POOL_SIZE:
+                opponent_pool.pop(0)
+
+            # Recreate envs with freshly sampled opponents from the pool.
+            envs.close()
+            envs = build_envs(vec_cls, n_envs, opponent_pool)
+            obs_np, infos = envs.reset()
+            obs   = torch.from_numpy(obs_np).float()
+            masks = masks_from_infos(infos, n_envs)
+            ep_reward_acc[:] = 0.0
+            ep_length_acc[:] = 0
 
     envs.close()
     save_checkpoint(agent, opt, num_rollouts - 1, global_step, args.checkpoint_dir, tag="final")

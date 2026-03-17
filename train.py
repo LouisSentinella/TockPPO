@@ -23,7 +23,7 @@ GAMMA         = 0.99
 GAE_LAMBDA    = 0.95
 LR            = 2.5e-4
 VALUE_COEF    = 0.5
-ENTROPY_COEF  = 0.01
+ENTROPY_COEF  = 0.015
 MAX_GRAD_NORM = 0.5
 TOTAL_STEPS   = 10_000_000
 CHECKPOINT_EVERY = 100     # rollouts
@@ -31,7 +31,7 @@ CHECKPOINT_EVERY = 100     # rollouts
 POOL_SIZE         = 10     # max frozen opponents to keep
 POOL_UPDATE_EVERY = 20     # rollouts between pool additions / env recreations
 
-RANDOM_OPP_FRACTION = 1.0  # probability each opponent slot uses random instead of pool
+RANDOM_OPP_FRACTION = 0.5  # probability each opponent slot uses random instead of pool
 
 
 def make_env(opponent_weights1, opponent_weights2):

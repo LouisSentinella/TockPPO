@@ -1,7 +1,7 @@
 import subprocess, glob, sys
 
 last_computed_checkpoint = 24412160
-log_file = "eval_log.csv"
+log_file = "checkpoints/run_2/eval_log.csv"
 
 for ckpt in sorted(glob.glob("checkpoints/ckpt_step_*.pt")):
     print(f"\n=== {ckpt} ===")

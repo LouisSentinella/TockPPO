@@ -55,6 +55,9 @@ def resolve_swap(state: GameState, pawn_one: Pawn, pawn_two: Pawn) -> GameState:
     new_pawn_one.index = new_pawn_two.index
     new_pawn_two.index = temp_idx
 
+    new_pawn_one.is_newly_deployed = False
+    new_pawn_two.is_newly_deployed = False
+
     return new_state
 
 def build_tile_map(state: GameState) -> dict[int, Optional[Pawn]]:
@@ -86,7 +89,8 @@ def add_normal_move_actions(card, pawn, board, tile_map, state, actions, steps=N
     except ValueError:
         return
 
-    crosses_home = board.HOME_ENTRY_TILES[pawn.owner] in path
+    crosses_home = (board.HOME_ENTRY_TILES[pawn.owner] in path or
+                    pawn.index == board.HOME_ENTRY_TILES[pawn.owner])
 
     if crosses_home:
         if pawn.owner == state.active_player:
@@ -139,8 +143,9 @@ def generate_seven_moves(remaining, moves_so_far, current_state, board, actions)
             except ValueError:
                 continue
 
-            # branch 2: enter home if path crosses home entry
-            if board.HOME_ENTRY_TILES[pawn.owner] in candidate_path:
+            # branch 2: enter home if path crosses (or starts at) home entry
+            if (board.HOME_ENTRY_TILES[pawn.owner] in candidate_path or
+                    pawn.index == board.HOME_ENTRY_TILES[pawn.owner]):
                 try:
                     home_path = board.get_path(pawn, steps, enter_home=True)
                     if not is_path_blocked(home_path, tile_map, board):
@@ -193,12 +198,12 @@ def get_legal_moves(state: GameState, board: Board) -> list[Action]:
                     actions.append(
                         Action(card=card, action_type=ActionType.MOVE, pawn=pawn, path=path, enter_home=False))
         elif card == 5:
-            for pawn in [p for j in state.pawns for p in j if p.zone != Zone.BASE and not board.is_just_out(p)]:
+            for pawn in [p for j in state.pawns for p in j if p.zone != Zone.BASE]:
                 add_normal_move_actions(card, pawn, board, tile_map, state, actions)
         elif card == 7:
             generate_seven_moves(7, [], state, board, actions)
         elif card == 11:
-            for pawn in [p for p in player_pawns if p.zone == Zone.MAIN and not board.is_just_out(p)]:
+            for pawn in [p for p in player_pawns if p.zone == Zone.MAIN]:
                 for other_pawn in [p for p in other_pawns if p.zone == Zone.MAIN and not board.is_just_out(p)]:
                     actions.append(Action(card=card, action_type=ActionType.SWAP, pawn=pawn, target_pawn=other_pawn))
         elif card == 13:
@@ -266,6 +271,7 @@ def advance_turn(state: GameState, action: Action) -> tuple[GameState, bool]:
             all_empty = False
 
     if all_empty:
+        new_state.skip_flag = False
         new_state.deal_round += 1
         if new_state.deal_round > 4:
             new_state.deal_round = 1
